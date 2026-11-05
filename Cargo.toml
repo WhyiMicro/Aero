@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A lightweight instant-replay clipper for Windows: hotkey saves the last N seconds of screen, game audio and mic."
 repository = "https://github.com/WhyiMicro/Aero"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"

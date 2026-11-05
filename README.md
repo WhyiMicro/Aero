@@ -128,3 +128,7 @@ cargo run --example mictest
 
 It prints the level of every input on every mic. Pick the device and input that peak highest in
 Settings → Audio.
+
+## License
+
+[MIT](LICENSE)
