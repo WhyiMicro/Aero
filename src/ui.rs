@@ -689,10 +689,16 @@ impl AeroApp {
                 let color = if *ok { Color32::from_rgb(76, 175, 80) } else { Color32::from_rgb(229, 57, 53) };
                 ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
                 ui.ctx().request_repaint_after(Duration::from_secs(1));
+            } else if dirty {
+                // Settings only take effect after Save; make that impossible to miss.
+                let text = if self.tab == Tab::Settings { "Unsaved changes" } else { "Unsaved settings changes" };
+                ui.label(RichText::new(text).color(Color32::from_rgb(255, 167, 38)).strong());
             }
             if self.tab == Tab::Settings {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(dirty, egui::Button::new(RichText::new("Save").strong())).clicked() {
+                    let save = egui::Button::new(RichText::new("Save").strong().color(if dirty { Color32::WHITE } else { ui.visuals().weak_text_color() }))
+                        .fill(if dirty { Color32::from_rgb(211, 47, 47) } else { ui.visuals().widgets.inactive.weak_bg_fill });
+                    if ui.add_enabled(dirty, save).clicked() {
                         self.apply_settings();
                     }
                     if ui.add_enabled(dirty, egui::Button::new("Undo")).clicked() {
