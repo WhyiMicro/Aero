@@ -1067,7 +1067,7 @@ fn release_notes_text(md: &str) -> String {
         .filter(|l| !l.contains("SHA-256"))
         .map(|l| {
             let l = l.trim_start_matches('#').trim_start();
-            let l = strip_md_links(l).replace("**", "").replace('`', "").replace('←', "Left").replace('→', "Right");
+            let l = strip_md_links(l).replace("**", "").replace('`', "").replace('←', "<-").replace('→', "->");
             match l.strip_prefix("- ") {
                 Some(rest) => format!("•  {rest}"),
                 None => l,
