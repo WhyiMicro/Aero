@@ -34,6 +34,7 @@ enum Msg {
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Clips,
+    Edit,
     Settings,
 }
 
@@ -78,6 +79,7 @@ pub struct AeroApp {
     autostart: bool,
     meters: Vec<(&'static str, f32)>,
     quitting: bool,
+    editor: crate::editor::Editor,
     /// Frames left before hiding a window that was started with --tray (see `ui`).
     hide_after_frames: u8,
 }
@@ -155,6 +157,7 @@ impl AeroApp {
 
         let hotkeys = GlobalHotKeyManager::new()?;
         let ffmpeg_exe = recorder::resolve_ffmpeg(&cfg.ffmpeg);
+        let ffmpeg_exe_for_editor = ffmpeg_exe.clone();
         let mut app = Self {
             draft: cfg.clone(),
             encoder: String::new(),
@@ -179,10 +182,12 @@ impl AeroApp {
             autostart: autostart_enabled(),
             meters: Vec::new(),
             quitting: false,
+            editor: crate::editor::Editor::new(cc.egui_ctx.clone(), ffmpeg_exe_for_editor),
             hide_after_frames: if start_hidden { 2 } else { 0 },
         };
-        if app.autostart {
+        if app.autostart && !is_dev_build() {
             // Keep the startup entry current (exe may have moved; older versions lacked --tray).
+            // Dev builds (cargo's target folder) never take it over from the installed copy.
             set_autostart(true);
         }
         app.encoder = recorder::pick_encoder(&app.runtime_cfg());
@@ -453,6 +458,7 @@ impl AeroApp {
             return;
         }
         let mut recycle = None;
+        let mut edit = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for (i, clip) in self.clips.iter().enumerate() {
                 egui::Frame::group(ui.style()).inner_margin(8.0).show(ui, |ui| {
@@ -460,11 +466,15 @@ impl AeroApp {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(RichText::new(&clip.when).strong());
-                            ui.label(RichText::new(format!("{:.1} MB", clip.size_mb)).small().weak());
+                            let trimmed = if clip.path.to_string_lossy().contains("_trim") { "  ·  trimmed" } else { "" };
+                            ui.label(RichText::new(format!("{:.1} MB{trimmed}", clip.size_mb)).small().weak());
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Delete").on_hover_text("Move to Recycle Bin").clicked() {
                                 recycle = Some(i);
+                            }
+                            if ui.button("Edit").on_hover_text("Trim this clip").clicked() {
+                                edit = Some(i);
                             }
                             if ui.button("Show").on_hover_text("Show in folder").clicked() {
                                 let _ = std::process::Command::new("explorer.exe")
@@ -479,13 +489,58 @@ impl AeroApp {
                 });
             }
         });
+        if let Some(i) = edit {
+            let path = self.clips[i].path.clone();
+            self.editor.open(&path);
+            self.tab = Tab::Edit;
+        }
         if let Some(i) = recycle {
-            if winutil::recycle(&self.clips[i].path) {
+            let path = self.clips[i].path.clone();
+            if self.editor.busy() && self.editor.current() == Some(path.as_path()) {
+                self.toast("That clip is being trimmed right now.", false);
+            } else if winutil::recycle(&path) {
+                self.editor.close_if(&path);
                 self.toast("Moved to Recycle Bin.", true);
             } else {
                 self.toast("Couldn't delete that clip.", false);
             }
             self.refresh_clips();
+        }
+    }
+
+    fn edit_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Clip");
+            let current = self.editor.current().map(|p| p.to_path_buf());
+            let shown = current
+                .as_ref()
+                .and_then(|p| self.clips.iter().find(|c| &c.path == p))
+                .map_or_else(|| "Choose a clip...".to_string(), clip_label);
+            let mut pick = None;
+            ui.add_enabled_ui(!self.editor.busy(), |ui| {
+                egui::ComboBox::from_id_salt("editclip").width(ui.available_width()).selected_text(shown).show_ui(ui, |ui| {
+                    for c in &self.clips {
+                        if ui.selectable_label(current.as_ref() == Some(&c.path), clip_label(c)).clicked() {
+                            pick = Some(c.path.clone());
+                        }
+                    }
+                });
+            });
+            if let Some(p) = pick {
+                self.editor.open(&p);
+            }
+        });
+        ui.add_space(6.0);
+        let (encoder, quality) = (self.encoder.clone(), self.cfg.quality);
+        let event = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.editor.ui(ui, &encoder, quality)).inner;
+        match event {
+            Some(crate::editor::EditEvent::Saved(p)) => {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                self.toast(format!("Saved {name}"), true);
+                self.refresh_clips();
+            }
+            Some(crate::editor::EditEvent::Failed(e)) => self.toast(format!("Trim failed: {e}"), false),
+            None => {}
         }
     }
 
@@ -740,6 +795,7 @@ impl eframe::App for AeroApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Clips, RichText::new("Clips").size(15.0));
+                ui.selectable_value(&mut self.tab, Tab::Edit, RichText::new("Edit").size(15.0));
                 ui.selectable_value(&mut self.tab, Tab::Settings, RichText::new("Settings").size(15.0));
             });
         });
@@ -748,6 +804,7 @@ impl eframe::App for AeroApp {
         });
         egui::CentralPanel::default().frame(egui::Frame::central_panel(ui.style()).inner_margin(12.0)).show(ui, |ui| match self.tab {
             Tab::Clips => self.clips_tab(ui),
+            Tab::Edit => self.edit_tab(ui),
             Tab::Settings => self.settings_tab(ui),
         });
 
@@ -775,6 +832,11 @@ fn style(ctx: &egui::Context) {
             }
         }
     });
+}
+
+fn clip_label(c: &Clip) -> String {
+    let trimmed = if c.path.to_string_lossy().contains("_trim") { " (trimmed)" } else { "" };
+    format!("{}{trimmed}  -  {:.1} MB", c.when, c.size_mb)
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
@@ -843,6 +905,13 @@ fn reg(args: &[&str]) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// True when running straight out of cargo's `target` folder rather than an installed copy.
+fn is_dev_build() -> bool {
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target")))
 }
 
 fn autostart_enabled() -> bool {

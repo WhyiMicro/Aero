@@ -43,8 +43,17 @@ Run `aero.exe` and a small window opens:
 
 - **Top:** recording status, live level meters for game audio and mic, a big **Save clip**
   button, and **Pause**.
-- **Clips tab:** your clips, newest first. **Play**, **Show** (in Explorer), or **Delete**
-  (moves the clip to the Recycle Bin).
+- **Clips tab:** your clips, newest first. **Play**, **Edit**, **Show** (in Explorer), or
+  **Delete** (moves the clip to the Recycle Bin).
+- **Edit tab:** trim a clip from the left and right. Drag the red handles on the thumbnail
+  strip and watch the preview frame. Click the strip to look at any moment, then use **Set
+  start here** / **Set end here**. Keys: ←/→ move 0.1 s (Shift: 1 s, Ctrl: 1 frame), **I**/**O**
+  set the start/end. **Play selection** plays just the trimmed part (if mpv is installed).
+  **Save trimmed clip** writes `…_trim.mp4` next to the original, or replaces the original
+  (which goes to the Recycle Bin).
+  - Saving is **instant and lossless**: the video isn't re-encoded, and players start exactly
+    at your handle. A few apps ignore that and show up to 2 s extra at the start; tick
+    **Re-encode** for those (it uses the GPU and takes about half the clip's length).
 - **Settings tab:** clip length, hotkey (click it, then press your combo), save folder, frame rate,
   quality, monitor, encoder, game audio and mic on/off, mic device, input and volume, and
   **Start with Windows**. Click **Save** to apply.

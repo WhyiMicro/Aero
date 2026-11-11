@@ -3,6 +3,7 @@
 
 mod audio;
 mod config;
+mod editor;
 mod icon;
 mod log;
 mod recorder;
