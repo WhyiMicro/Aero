@@ -11,7 +11,8 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
+    CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, OpenProcess, PROCESS_SYNCHRONIZE,
+    SetEvent, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::{
     FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW, SHFileOperationW,
@@ -125,4 +126,15 @@ pub fn recycle(path: &std::path::Path) -> bool {
 
 pub fn monitor_count() -> u32 {
     unsafe { GetSystemMetrics(SM_CMONITORS).max(1) as u32 }
+}
+
+/// Waits (up to `timeout`) for the process with this PID to exit. Returns at once if it's gone.
+pub fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) {
+    unsafe {
+        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if !h.is_null() {
+            WaitForSingleObject(h, timeout.as_millis() as u32);
+            CloseHandle(h);
+        }
+    }
 }

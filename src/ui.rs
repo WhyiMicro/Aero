@@ -6,7 +6,7 @@
 
 use crate::config::Config;
 use crate::recorder::{self, Recorder};
-use crate::{audio, info, winutil};
+use crate::{audio, info, updater, winutil};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -29,6 +29,18 @@ enum Msg {
     Menu(MenuId),
     Show,
     Saved(Result<PathBuf, String>),
+    /// Result of an update check; `bool` = the user asked for it (vs. the daily check).
+    UpdateChecked(Result<Option<updater::Release>, String>, bool),
+    UpdateInstalled(Result<PathBuf, String>),
+}
+
+enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(updater::Release),
+    Installing(updater::Release),
+    Failed(String),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -49,6 +61,7 @@ struct TrayItems {
     save: MenuItem,
     pause: MenuItem,
     folder: MenuItem,
+    update: MenuItem,
     quit: MenuItem,
 }
 
@@ -82,6 +95,9 @@ pub struct AeroApp {
     editor: crate::editor::Editor,
     /// Frames left before hiding a window that was started with --tray (see `ui`).
     hide_after_frames: u8,
+    update: UpdateState,
+    /// Whether the "update available" dialog should be showing.
+    update_prompt: bool,
 }
 
 impl AeroApp {
@@ -91,6 +107,7 @@ impl AeroApp {
         cfg: Config,
         show_signal: Option<winutil::ShowSignal>,
         start_hidden: bool,
+        just_updated: bool,
     ) -> anyhow::Result<Self> {
         let ctx = cc.egui_ctx.clone();
         style(&ctx);
@@ -137,6 +154,7 @@ impl AeroApp {
             save: MenuItem::new(format!("Save clip\t{}", cfg.hotkey), true, None),
             pause: MenuItem::new("Pause recording", true, None),
             folder: MenuItem::new("Open clips folder", true, None),
+            update: MenuItem::new("Check for updates", true, None),
             quit: MenuItem::new("Quit", true, None),
         };
         let menu = Menu::new();
@@ -146,6 +164,7 @@ impl AeroApp {
             &items.pause,
             &items.folder,
             &PredefinedMenuItem::separator(),
+            &items.update,
             &items.quit,
         ])?;
         let tray = TrayIconBuilder::new()
@@ -184,8 +203,16 @@ impl AeroApp {
             quitting: false,
             editor: crate::editor::Editor::new(cc.egui_ctx.clone(), ffmpeg_exe_for_editor),
             hide_after_frames: if start_hidden { 2 } else { 0 },
+            update: UpdateState::Idle,
+            update_prompt: false,
         };
-        if app.autostart && !is_dev_build() {
+        if just_updated {
+            app.toast(format!("Updated to Aero {}", updater::current()), true);
+        }
+        if app.cfg.check_updates && updater::auto_check_due() {
+            app.check_for_updates(false);
+        }
+        if app.autostart && !updater::is_dev_build() {
             // Keep the startup entry current (exe may have moved; older versions lacked --tray).
             // Dev builds (cargo's target folder) never take it over from the installed copy.
             set_autostart(true);
@@ -204,6 +231,102 @@ impl AeroApp {
 
     fn toast(&mut self, text: impl Into<String>, ok: bool) {
         self.toast = Some((text.into(), ok, Instant::now()));
+    }
+
+    // ---------------------------------------------------------------- updates
+
+    /// `manual`: the user clicked "Check for updates" (always prompt, report "up to date").
+    fn check_for_updates(&mut self, manual: bool) {
+        if matches!(self.update, UpdateState::Checking | UpdateState::Installing(_)) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let r = updater::check().map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::UpdateChecked(r, manual));
+            ctx.request_repaint();
+        });
+    }
+
+    fn install_update(&mut self) {
+        let UpdateState::Available(rel) = &self.update else { return };
+        if updater::is_dev_build() {
+            self.toast("This is a development build: update it with git pull and install.ps1.", false);
+            return;
+        }
+        let rel = rel.clone();
+        self.update = UpdateState::Installing(rel.clone());
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let r = updater::install(&rel).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::UpdateInstalled(r));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The "a new version is available" prompt.
+    fn update_dialog(&mut self, ctx: &egui::Context) {
+        let installing = matches!(self.update, UpdateState::Installing(_));
+        let rel = match &self.update {
+            UpdateState::Available(r) | UpdateState::Installing(r) if self.update_prompt || installing => r.clone(),
+            _ => return,
+        };
+        let (mut update, mut later, mut skip) = (false, false, false);
+        let resp = egui::Modal::new(egui::Id::unique("update-dialog")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading(format!("Aero {} is available", rel.version));
+            ui.label(RichText::new(format!("You have Aero {}.", updater::current())).weak());
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                ui.label(release_notes_text(&rel.notes));
+            });
+            if !rel.page_url.is_empty() {
+                ui.hyperlink_to("View the release on GitHub", &rel.page_url);
+            }
+            ui.add_space(8.0);
+            if installing {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Downloading and installing... Aero restarts by itself.");
+                });
+            } else {
+                if rel.sha256.is_none() {
+                    ui.label(RichText::new("This release has no checksum, so the download can't be verified.").small().weak());
+                }
+                ui.horizontal(|ui| {
+                    let button = egui::Button::new(RichText::new("Update now").strong().color(Color32::WHITE)).fill(Color32::from_rgb(211, 47, 47));
+                    update = ui.add(button).on_hover_text("Downloads the new version, then restarts Aero. Your settings and clips are kept.").clicked();
+                    later = ui.button("Later").clicked();
+                    skip = ui.button("Skip this version").on_hover_text("Don't remind me about this version again").clicked();
+                });
+            }
+        });
+        if installing {
+            return;
+        }
+        if update {
+            self.install_update();
+        } else if skip {
+            updater::skip(&rel.tag);
+            self.update_prompt = false;
+            self.update = UpdateState::Idle;
+            self.update_tray_item();
+            if let Some(tray) = &self.tray {
+                let _ = tray.set_tooltip(Some("Aero"));
+            }
+        } else if later || resp.should_close() {
+            self.update_prompt = false;
+        }
+    }
+
+    fn update_tray_item(&self) {
+        let text = match &self.update {
+            UpdateState::Available(r) => format!("Update to Aero {}...", r.version),
+            UpdateState::Installing(_) => "Updating...".into(),
+            _ => "Check for updates".into(),
+        };
+        self.items.update.set_text(text);
     }
 
     // ---------------------------------------------------------------- actions
@@ -349,10 +472,67 @@ impl AeroApp {
                     self.set_recording(self.rec.is_none());
                 } else if id == *self.items.folder.id() {
                     open_folder(&self.cfg.clips_dir());
+                } else if id == *self.items.update.id() {
+                    self.show_window();
+                    if matches!(self.update, UpdateState::Available(_)) {
+                        self.update_prompt = true;
+                    } else {
+                        self.check_for_updates(true);
+                    }
                 } else if id == *self.items.quit.id() {
                     self.quit();
                 }
             }
+            Msg::UpdateChecked(r, manual) => {
+                self.update = match r {
+                    Ok(Some(rel)) => {
+                        let skipped = !manual && rel.tag == updater::skipped_tag();
+                        info!("update available: {} (skipped: {skipped})", rel.tag);
+                        // Only pop the dialog for a manual check, or a version not skipped.
+                        // If the window is hidden, it appears when the window is next opened.
+                        self.update_prompt = !skipped;
+                        if let Some(tray) = &self.tray
+                            && !skipped
+                        {
+                            let _ = tray.set_tooltip(Some(format!("Aero - update available: {}", rel.version)));
+                        }
+                        UpdateState::Available(rel)
+                    }
+                    Ok(None) => {
+                        if manual {
+                            self.toast(format!("You're up to date (Aero {}).", updater::current()), true);
+                        }
+                        UpdateState::UpToDate
+                    }
+                    Err(e) => {
+                        info!("update check failed: {e}");
+                        if manual {
+                            self.toast(format!("Couldn't check for updates: {e}"), false);
+                            UpdateState::Failed(e)
+                        } else {
+                            UpdateState::Idle
+                        }
+                    }
+                };
+                self.update_tray_item();
+            }
+            Msg::UpdateInstalled(r) => match r {
+                Ok(exe) => match updater::relaunch(&exe, true) {
+                    Ok(()) => {
+                        info!("restarting into the new version");
+                        self.quit();
+                    }
+                    Err(e) => self.toast(format!("Update installed, but restarting failed ({e:#}). Start Aero again."), false),
+                },
+                Err(e) => {
+                    info!("update failed: {e}");
+                    if let UpdateState::Installing(rel) = std::mem::replace(&mut self.update, UpdateState::Idle) {
+                        self.update = UpdateState::Available(rel);
+                    }
+                    self.update_tray_item();
+                    self.toast(format!("Update failed: {e}"), false);
+                }
+            },
             Msg::Saved(r) => {
                 self.saving = false;
                 match r {
@@ -394,6 +574,13 @@ impl AeroApp {
                 }
             });
         });
+
+        if let UpdateState::Available(r) = &self.update
+            && !self.update_prompt
+            && ui.link(RichText::new(format!("Update available: Aero {} - click to see what's new", r.version)).small()).clicked()
+        {
+            self.update_prompt = true;
+        }
 
         if self.rec.as_ref().is_some_and(|r| r.capture_blocked()) {
             ui.label(
@@ -549,6 +736,7 @@ impl AeroApp {
             self.mics = Some(audio::list_mics());
             self.default_mic = audio::default_mic();
         }
+        let (mut check_now, mut show_prompt) = (false, false);
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let d = &mut self.draft;
 
@@ -731,8 +919,44 @@ impl AeroApp {
                 }
                 ui.label(RichText::new("- aero.log and ffmpeg.log").small().weak());
             });
+
+            section(ui, "Updates");
+            ui.horizontal(|ui| {
+                ui.label(format!("Aero {}", updater::current()));
+                let checking = matches!(self.update, UpdateState::Checking | UpdateState::Installing(_));
+                if ui.add_enabled(!checking, egui::Button::new("Check for updates")).clicked() {
+                    check_now = true;
+                }
+                match &self.update {
+                    UpdateState::Checking => {
+                        ui.spinner();
+                    }
+                    UpdateState::UpToDate => {
+                        ui.label(RichText::new("You're up to date").color(Color32::from_rgb(76, 175, 80)));
+                    }
+                    UpdateState::Available(r) => {
+                        if ui.link(format!("Aero {} is available", r.version)).clicked() {
+                            show_prompt = true;
+                        }
+                    }
+                    UpdateState::Installing(_) => {
+                        ui.label("Updating...");
+                    }
+                    UpdateState::Failed(e) => {
+                        ui.label(RichText::new("Check failed").color(Color32::from_rgb(229, 57, 53))).on_hover_text(e.as_str());
+                    }
+                    UpdateState::Idle => {}
+                }
+            });
+            ui.checkbox(&mut d.check_updates, "Check for updates automatically (once a day)");
             ui.add_space(8.0);
         });
+        if check_now {
+            self.check_for_updates(true);
+        }
+        if show_prompt {
+            self.update_prompt = true;
+        }
     }
 
     fn footer(&mut self, ui: &mut egui::Ui) {
@@ -808,6 +1032,8 @@ impl eframe::App for AeroApp {
             Tab::Settings => self.settings_tab(ui),
         });
 
+        self.update_dialog(ui.ctx());
+
         if self.rec.is_some() {
             ui.ctx().request_repaint_after(Duration::from_millis(50)); // level meters
         }
@@ -832,6 +1058,40 @@ fn style(ctx: &egui::Context) {
             }
         }
     });
+}
+
+/// Release notes as plain text: Markdown markers and link targets removed, checksum line
+/// dropped, and symbols the default font lacks spelled out.
+fn release_notes_text(md: &str) -> String {
+    md.lines()
+        .filter(|l| !l.contains("SHA-256"))
+        .map(|l| {
+            let l = l.trim_start_matches('#').trim_start();
+            let l = strip_md_links(l).replace("**", "").replace('`', "").replace('←', "Left").replace('→', "Right");
+            match l.strip_prefix("- ") {
+                Some(rest) => format!("•  {rest}"),
+                None => l,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// `[text](url)` -> `text`.
+fn strip_md_links(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find("](").map(|i| open + i) else { break };
+        let Some(end) = rest[close..].find(')').map(|i| close + i) else { break };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..close]);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn clip_label(c: &Clip) -> String {
@@ -905,13 +1165,6 @@ fn reg(args: &[&str]) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
-}
-
-/// True when running straight out of cargo's `target` folder rather than an installed copy.
-fn is_dev_build() -> bool {
-    std::env::current_exe()
-        .ok()
-        .is_some_and(|p| p.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target")))
 }
 
 fn autostart_enabled() -> bool {

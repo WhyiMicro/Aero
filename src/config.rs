@@ -17,6 +17,7 @@ pub struct Config {
     pub microphone_channel: u32,
     pub microphone_volume: f32,
     pub capture: String,
+    pub check_updates: bool,
     pub output_dir: String,
     pub ffmpeg: String,
 }
@@ -36,6 +37,7 @@ impl Default for Config {
             microphone_channel: 1,
             microphone_volume: 1.0,
             capture: "auto".into(),
+            check_updates: true,
             output_dir: String::new(),
             ffmpeg: "ffmpeg".into(),
         }
@@ -88,6 +90,9 @@ output_dir = ""
 
 # Path to ffmpeg.exe, or just "ffmpeg" if it's on your PATH.
 ffmpeg = "ffmpeg"
+
+# Look for a new Aero version on GitHub once a day and offer to install it.
+check_updates = true
 "#;
 
 impl Config {

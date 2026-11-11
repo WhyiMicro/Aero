@@ -64,6 +64,24 @@ clips folder and **Quit**.
 
 You hear a "ding" when a clip is saved, or an error sound if saving failed.
 
+## Updates
+
+Aero checks GitHub for a new release once a day (Settings → Updates; you can turn this off). You
+can also click **Check for updates** there, or in the tray menu. When a newer version exists, a
+dialog shows what's new, with three choices:
+
+- **Update now:** downloads the new `aero.exe`, checks it against the SHA-256 in the release
+  notes, swaps it in and restarts Aero. Your settings and clips are kept.
+- **Later:** asks again next time.
+- **Skip this version:** stops reminding you about this version.
+
+If Aero is hidden in the tray when the daily check finds an update, it doesn't pop up. The tray
+menu and the window show "Update available" instead.
+
+The check is a plain request to `api.github.com` made with Windows' built-in `curl.exe`. Nothing
+about you or your clips is sent. Copies running from cargo's `target` folder (development builds)
+can check but don't install; update those with `git pull` and `install.ps1`.
+
 ## Settings file (`%APPDATA%\Aero\config.toml`)
 
 The Settings tab writes this file. You can also edit it by hand while Aero is closed.
@@ -82,6 +100,8 @@ microphone_channel = 1   # input on the device (audio interfaces: 1 = mic, 2 = i
 microphone_volume = 1.0  # 2.0 = twice as loud
 output_dir = ""          # empty = Videos\Aero
 ffmpeg = "ffmpeg"        # or a full path to ffmpeg.exe
+capture = "auto"         # auto | wgc (Windows Graphics Capture) | dda (Desktop Duplication)
+check_updates = true     # look for a new version once a day
 ```
 
 ## How it works

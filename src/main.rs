@@ -8,6 +8,7 @@ mod icon;
 mod log;
 mod recorder;
 mod ui;
+mod updater;
 mod winutil;
 
 use anyhow::{Context, Result, bail};
@@ -16,6 +17,12 @@ use eframe::egui;
 use std::path::PathBuf;
 
 fn main() {
+    // After an update, the new version is started by the old one: wait for it to exit
+    // (it holds the single-instance lock and the tray icon).
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pid) = args.iter().position(|a| a == "--wait-pid").and_then(|i| args.get(i + 1)?.parse().ok()) {
+        winutil::wait_for_process_exit(pid, std::time::Duration::from_secs(15));
+    }
     if !winutil::single_instance() {
         // Already running: bring its window to the front instead.
         winutil::ShowSignal::signal_running_instance();
@@ -41,8 +48,11 @@ fn run() -> Result<()> {
     let cfg = Config::load_or_create(&paths.config)?;
     check_ffmpeg(&recorder::resolve_ffmpeg(&cfg.ffmpeg))?;
 
+    updater::cleanup_old();
+
     // Launched by "Start with Windows": go straight to the tray.
     let start_hidden = std::env::args().any(|a| a == "--tray");
+    let just_updated = std::env::args().any(|a| a == "--updated");
     let signal = winutil::ShowSignal::create();
     let icon = egui::IconData { rgba: ui::icon_rgba(true), width: ui::ICON, height: ui::ICON };
     let options = eframe::NativeOptions {
@@ -54,11 +64,11 @@ fn run() -> Result<()> {
             .with_icon(icon),
         ..Default::default()
     };
-    info!("Aero starting (hidden: {start_hidden})");
+    info!("Aero {} starting (hidden: {start_hidden}, just updated: {just_updated})", updater::current());
     eframe::run_native(
         "Aero",
         options,
-        Box::new(move |cc| Ok(Box::new(ui::AeroApp::new(cc, paths, cfg, signal, start_hidden)?))),
+        Box::new(move |cc| Ok(Box::new(ui::AeroApp::new(cc, paths, cfg, signal, start_hidden, just_updated)?))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
